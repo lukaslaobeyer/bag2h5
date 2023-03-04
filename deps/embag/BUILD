@@ -1,0 +1,33 @@
+cc_library(
+    name = "embag",
+    include_prefix = "embag",
+    srcs = [
+        "embag.cc",
+        "message_def_parser.cc",
+        "message_parser.cc",
+        "ros_value.cc",
+        "view.cc",
+    ],
+    hdrs = [
+        "decompression.h",
+        "embag.h",
+        "message_def_parser.h",
+        "message_parser.h",
+        "ros_bag_types.h",
+        "ros_message.h",
+        "ros_msg_types.h",
+        "ros_value.h",
+        "span.hpp",
+        "util.h",
+        "view.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@boost//:fusion",
+        "@boost//:iostreams",
+        "@boost//:spirit",
+        "@boost//:variant",
+        "@libbz2//:bz2",
+        "@liblz4//:lz4_frame",
+    ],
+)

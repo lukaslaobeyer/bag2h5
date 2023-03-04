@@ -1,0 +1,15 @@
+diff --git a/src/hdf5.h b/src/hdf5.h
+index 5be0efe245..4eaf55c38a 100644
+--- a/src/hdf5.h
++++ b/src/hdf5.h
+@@ -71,8 +71,8 @@
+ #ifdef H5_HAVE_WINDOWS
+ #include "H5FDwindows.h" /* Win32 I/O                                */
+ #endif
+-#include "H5FDsubfiling.h" /* Subfiling VFD                            */
+-#include "H5FDioc.h"       /* I/O Concentrator VFD                     */
++// #include "H5FDsubfiling.h" /* Subfiling VFD                            */
++// #include "H5FDioc.h"       /* I/O Concentrator VFD                     */
+ 
+ /* Virtual object layer (VOL) connectors */
+ #include "H5VLnative.h"   /* Native VOL connector                     */

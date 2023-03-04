@@ -1,0 +1,15 @@
+diff --git a/lib/ros_value.h b/lib/ros_value.h
+index 0703eed..0d528eb 100644
+--- a/ros_value.h
++++ b/ros_value.h
+@@ -294,6 +294,10 @@ class RosValue {
+   template<typename T>
+   const T &getValue(const std::string &key) const;
+ 
++  const char* data() const {
++    return primitive_info_.message_buffer->data() + primitive_info_.offset;
++  }
++
+   template<typename T>
+   const T as() const {
+     if (type_ == Type::object || type_ == Type::array) {
