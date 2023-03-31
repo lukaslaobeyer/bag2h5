@@ -93,7 +93,6 @@ HighFive::DataType h5_datatype_from_value(const T&) {
     return HighFive::create_datatype<T>();
 }
 
-
 template <typename T>
 size_t get_size(const T&) {
     return sizeof(T);

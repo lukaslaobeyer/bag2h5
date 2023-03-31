@@ -2,17 +2,19 @@
 
 #include <iostream>
 
-
 namespace logging {
 void print_progress(double progress) {
     constexpr int bar_width = 70;
-    
+
     std::cout << "[";
     const int pos = bar_width * progress;
     for (int i = 0; i < bar_width; ++i) {
-        if (i < pos) std::cout << "=";
-        else if (i == pos) std::cout << ">";
-        else std::cout << " ";
+        if (i < pos)
+            std::cout << "=";
+        else if (i == pos)
+            std::cout << ">";
+        else
+            std::cout << " ";
     }
     std::cout << "] " << int(progress * 100.0) << " %\r";
 
@@ -22,4 +24,4 @@ void print_progress(double progress) {
 
     std::cout.flush();
 }
-}
+} // namespace logging

@@ -1,15 +1,15 @@
 #include "logging.h"
 #include "type_info.h"
 
-#include <vector>
 #include <unordered_map>
+#include <vector>
 
 #include <Eigen/Dense>
-#include <magic_enum.hpp>
 #include <embag/view.h>
 #include <highfive/H5DataSet.hpp>
 #include <highfive/H5DataSpace.hpp>
 #include <highfive/H5File.hpp>
+#include <magic_enum.hpp>
 
 namespace bag2h5::h5_conversion {
 
@@ -39,7 +39,10 @@ struct H5Dataset {
               std::vector<hsize_t>&& chunk_dims_in,
               std::vector<hsize_t>&& prim_dims_in,
               const h5::DataType& h5_type_in)
-        : d(d_in), chunk_dims(chunk_dims_in), prim_dims(prim_dims_in), h5_type(h5_type_in) {}
+        : d(d_in)
+        , chunk_dims(chunk_dims_in)
+        , prim_dims(prim_dims_in)
+        , h5_type(h5_type_in) {}
 
     h5::DataSet d;
     const std::vector<hsize_t> chunk_dims;
@@ -58,11 +61,10 @@ H5Dataset create_dataset(h5::File& f,
     std::vector<hsize_t> primitive_array_dims = get_primitive_array_dims(v);
     std::vector<hsize_t> full_dims(1 + dims.size() + primitive_array_dims.size());
     full_dims.at(0) = 0;
-    std::transform(dims.begin(),
-                   dims.end(),
-                   full_dims.begin() + 1,
+    std::transform(dims.begin(), dims.end(), full_dims.begin() + 1,
                    [](const size_t& i) { return static_cast<hsize_t>(i); });
-    std::copy(primitive_array_dims.begin(), primitive_array_dims.end(), full_dims.begin() + 1 + dims.size());
+    std::copy(primitive_array_dims.begin(), primitive_array_dims.end(),
+              full_dims.begin() + 1 + dims.size());
     std::vector<hsize_t> max_dims(full_dims);
     max_dims[0] = h5::DataSpace::UNLIMITED;
     h5::DataSpace dataspace(full_dims, max_dims);
@@ -70,42 +72,34 @@ H5Dataset create_dataset(h5::File& f,
     // Chunking
     constexpr hsize_t MAX_FLAT_CHUNK_SIZE = 1000000;
 
-    const size_t nonprim_dims_prod = std::reduce(
-        dims.begin(), dims.end(), 1, std::multiplies<>()
-    );
+    const size_t nonprim_dims_prod = std::reduce(dims.begin(), dims.end(), 1, std::multiplies<>());
     const size_t elem_size = nonprim_dims_prod * std::max(1uz, get_size(v)); // must be positive
     std::vector<hsize_t> chunk_dims(full_dims.size());
     chunk_dims.at(0) =
-        1 + std::trunc(static_cast<double>(MAX_FLAT_CHUNK_SIZE)/static_cast<double>(elem_size) - 0.5);
+        1 +
+        std::trunc(static_cast<double>(MAX_FLAT_CHUNK_SIZE) / static_cast<double>(elem_size) - 0.5);
     std::copy(full_dims.begin() + 1, full_dims.end(), chunk_dims.begin() + 1);
 
     // Datatype
     h5::DataType h5_datatype = h5_datatype_from_value(v);
 
     // Debug
-    LOG_DEBUG("Creating dataspace for %s [%s]", dataset_name.c_str(), it_to_string(dims, "x").c_str());
+    LOG_DEBUG("Creating dataspace for %s [%s]", dataset_name.c_str(),
+              it_to_string(dims, "x").c_str());
     LOG_DEBUG("  - num primitive dims = %lu", primitive_array_dims.size());
-    LOG_DEBUG("  - dataspace: %s, chunks: %s",
-              it_to_string(full_dims, "x").c_str(),
+    LOG_DEBUG("  - dataspace: %s, chunks: %s", it_to_string(full_dims, "x").c_str(),
               it_to_string(chunk_dims, "x").c_str());
 
     h5::DataSetCreateProps props;
     props.add(h5::Chunking(chunk_dims));
-    return H5Dataset(
-        f.createDataSet(dataset_name, dataspace, h5_datatype, props),
-        std::move(chunk_dims),
-        std::move(primitive_array_dims),
-        h5_datatype
-    );
+    return H5Dataset(f.createDataSet(dataset_name, dataspace, h5_datatype, props),
+                     std::move(chunk_dims), std::move(primitive_array_dims), h5_datatype);
 }
 
 class NDBuffer {
 public:
     template <typename ValueT>
-    NDBuffer(h5::File& f,
-             const std::string& dataset_name,
-             const NDIndex& dims,
-             const ValueT& v)
+    NDBuffer(h5::File& f, const std::string& dataset_name, const NDIndex& dims, const ValueT& v)
         : d_(create_dataset(f, dataset_name, dims, v))
         , dims_(dims)
         , awaiting_first_msg_(true)
@@ -113,14 +107,11 @@ public:
         , dataset_index_count_(d_.chunk_dims.size(), 1)
         , dataset_size_(d_.chunk_dims)
         , msg_idx_(0) {
-        std::copy(d_.prim_dims.begin(),
-                  d_.prim_dims.end(),
+        std::copy(d_.prim_dims.begin(), d_.prim_dims.end(),
                   dataset_index_count_.end() - d_.prim_dims.size());
     }
 
-    const NDIndex& dims() const {
-        return dims_;
-    }
+    const NDIndex& dims() const { return dims_; }
 
     template <typename T>
     void write_value(const T& v, h5::Selection&& selection) {
@@ -139,10 +130,8 @@ public:
         }
 
         if (type == Embag::RosValue::Type::primitive_array) {
-            selection.write_raw(
-                reinterpret_cast<const char*>(v->getPrimitiveArrayRosValueBuffer()),
-                d_.h5_type
-            );
+            selection.write_raw(reinterpret_cast<const char*>(v->getPrimitiveArrayRosValueBuffer()),
+                                d_.h5_type);
         } else if (type == Embag::RosValue::Type::string) {
             const std::string str = v->as<std::string>();
             selection.write(str);
@@ -153,9 +142,7 @@ public:
             const double duration = v->as<Embag::RosValue::ros_duration_t>().to_sec();
             selection.write_raw(&duration, d_.h5_type);
         } else {
-            selection.write_raw(
-                v->data(), d_.h5_type
-            );
+            selection.write_raw(v->data(), d_.h5_type);
         }
     }
 
@@ -216,9 +203,9 @@ public:
 private:
     void process_value(const size_t msg_idx,
                        const Embag::RosValue::Pointer& v,
-                       const std::string& dataset="",
-                       const NDIndex& dims={},
-                       const NDIndex& index={}) {
+                       const std::string& dataset = "",
+                       const NDIndex& dims = {},
+                       const NDIndex& index = {}) {
         if (v->getType() == Embag::RosValue::Type::object) {
             for (const auto& [key, child] : v->getObjects()) {
                 process_value(msg_idx, child, dataset + "/" + key, dims, index);
@@ -229,11 +216,7 @@ private:
                 NDIndex new_dims(append(dims, values.size()));
                 for (size_t i = 0; i < values.size(); ++i) {
                     NDIndex new_index(append(index, i));
-                    process_value(msg_idx,
-                                  values.at(i),
-                                  dataset,
-                                  new_dims,
-                                  new_index);
+                    process_value(msg_idx, values.at(i), dataset, new_dims, new_index);
                 }
             }
         } else if (v->getType() == Embag::RosValue::Type::ros_time) {
@@ -267,8 +250,7 @@ private:
                       const NDIndex& index,
                       const ValueT& v) {
         if (datasets_.count(dataset) == 0) {
-            datasets_.emplace(std::piecewise_construct,
-                              std::forward_as_tuple(dataset),
+            datasets_.emplace(std::piecewise_construct, std::forward_as_tuple(dataset),
                               std::forward_as_tuple(h5_file_, dataset, dims, v));
         }
 
@@ -285,7 +267,7 @@ private:
     std::unordered_map<std::string, NDBuffer> datasets_;
 };
 
-}
+} // namespace bag2h5::h5_conversion
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -318,7 +300,7 @@ int main(int argc, char** argv) {
 
         const double t = m->timestamp.to_sec() - t_start;
         if (std::isnan(t_prev) || t - t_prev > log_dt) {
-            logging::print_progress(t/(t_end - t_start));
+            logging::print_progress(t / (t_end - t_start));
             t_prev = t;
         }
     }
