@@ -63,7 +63,10 @@ http_archive(
     build_file = "@//deps/embag:BUILD",
     url = "https://github.com/embarktrucks/embag/archive/74c0b5f9d50bd45bcb6ed8e44718cd60924c13d0.tar.gz",
     strip_prefix="embag-74c0b5f9d50bd45bcb6ed8e44718cd60924c13d0/lib",
-    patches = [ "@//deps/embag:add_raw_data_accessor.patch" ],
+    patches = [
+        "@//deps/embag:add_raw_data_accessor.patch",
+        "@//deps/embag:use_std_span.patch"
+    ],
     patch_args = [ "-p1" ],
 )
 
