@@ -50,8 +50,27 @@ struct H5Dataset {
     const h5::DataType h5_type;
 };
 
+class ROSDatasetAttributes {
+public:
+    ROSDatasetAttributes(Embag::RosMessage& m)
+        : topic_name(m.topic)
+        , msg_type(m.getTypeName()) {}
+
+    void write(h5::DataSet& dataset) const {
+        dataset.createAttribute<std::string>("ros_topic", h5::DataSpace::From(topic_name))
+            .write(topic_name);
+        dataset.createAttribute<std::string>("ros_msg_type", h5::DataSpace::From(msg_type))
+            .write(msg_type);
+    }
+
+private:
+    const std::string topic_name;
+    const std::string msg_type;
+};
+
 template <typename ValueT>
 H5Dataset create_dataset(h5::File& f,
+                         const ROSDatasetAttributes& attrs,
                          const std::string& dataset_name,
                          const NDIndex& dims,
                          const ValueT& v) {
@@ -92,15 +111,23 @@ H5Dataset create_dataset(h5::File& f,
 
     h5::DataSetCreateProps props;
     props.add(h5::Chunking(chunk_dims));
-    return H5Dataset(f.createDataSet(dataset_name, dataspace, h5_datatype, props),
-                     std::move(chunk_dims), std::move(primitive_array_dims), h5_datatype);
+
+    h5::DataSet h5_dataset = f.createDataSet(dataset_name, dataspace, h5_datatype, props);
+    attrs.write(h5_dataset);
+    return H5Dataset(std::move(h5_dataset),
+                     std::move(chunk_dims),
+                     std::move(primitive_array_dims), h5_datatype);
 }
 
 class NDBuffer {
 public:
     template <typename ValueT>
-    NDBuffer(h5::File& f, const std::string& dataset_name, const NDIndex& dims, const ValueT& v)
-        : d_(create_dataset(f, dataset_name, dims, v))
+    NDBuffer(h5::File& f,
+             const ROSDatasetAttributes& attrs,
+             const std::string& dataset_name,
+             const NDIndex& dims,
+             const ValueT& v)
+        : d_(create_dataset(f, attrs, dataset_name, dims, v))
         , dims_(dims)
         , awaiting_first_msg_(true)
         , dataset_index_(d_.chunk_dims.size(), 0)
@@ -182,12 +209,12 @@ private:
 
 class H5Writer {
 public:
-    H5Writer(std::string outfile)
+    H5Writer(const std::string& outfile)
         : h5_file_(outfile, h5::File::Overwrite) {}
 
     void process_msg(Embag::RosMessage& m) {
-        insert_timestamp(num_msgs_, m.topic + "/__ros_msg/timestamp", {}, {}, m.timestamp);
-        process_value(num_msgs_, m.data(), m.topic);
+        insert_timestamp(m, num_msgs_, m.topic + "/__ros_msg/timestamp", {}, {}, m.timestamp);
+        process_value(m, num_msgs_, m.data(), m.topic);
         ++num_msgs_;
     }
 
@@ -201,14 +228,15 @@ public:
     }
 
 private:
-    void process_value(const size_t msg_idx,
+    void process_value(Embag::RosMessage& m,
+                       const size_t msg_idx,
                        const Embag::RosValue::Pointer& v,
                        const std::string& dataset = "",
                        const NDIndex& dims = {},
                        const NDIndex& index = {}) {
         if (v->getType() == Embag::RosValue::Type::object) {
             for (const auto& [key, child] : v->getObjects()) {
-                process_value(msg_idx, child, dataset + "/" + key, dims, index);
+                process_value(m, msg_idx, child, dataset + "/" + key, dims, index);
             }
         } else if (v->getType() == Embag::RosValue::Type::array) {
             const auto& values = v->getValues();
@@ -216,42 +244,46 @@ private:
                 NDIndex new_dims(append(dims, values.size()));
                 for (size_t i = 0; i < values.size(); ++i) {
                     NDIndex new_index(append(index, i));
-                    process_value(msg_idx, values.at(i), dataset, new_dims, new_index);
+                    process_value(m, msg_idx, values.at(i), dataset, new_dims, new_index);
                 }
             }
         } else if (v->getType() == Embag::RosValue::Type::ros_time) {
-            insert_timestamp(msg_idx, dataset, dims, index, v->as<Embag::RosValue::ros_time_t>());
+            insert_timestamp(m, msg_idx, dataset, dims, index,
+                             v->as<Embag::RosValue::ros_time_t>());
         } else if (type_info::is_primitive(v->getType())) {
             const std::string type_name(magic_enum::enum_name(v->getType()));
-            insert_value(msg_idx, dataset, dims, index, v);
+            insert_value(m, msg_idx, dataset, dims, index, v);
         } else {
             throw std::runtime_error("unknown value at " + dataset);
         }
     }
 
-    void insert_timestamp(const size_t msg_idx,
+    void insert_timestamp(Embag::RosMessage& m,
+                          const size_t msg_idx,
                           const std::string& dataset,
                           const NDIndex& dims,
                           const NDIndex& index,
                           const Embag::RosValue::ros_time_t& stamp) {
         constexpr bool CONVERT_TIMESTAMP_TO_DOUBLE = false;
         if (CONVERT_TIMESTAMP_TO_DOUBLE) {
-            insert_value(msg_idx, dataset, dims, index, stamp);
+            insert_value(m, msg_idx, dataset, dims, index, stamp);
         } else {
-            insert_value(msg_idx, dataset + "/secs", dims, index, stamp.secs);
-            insert_value(msg_idx, dataset + "/nsecs", dims, index, stamp.nsecs);
+            insert_value(m, msg_idx, dataset + "/secs", dims, index, stamp.secs);
+            insert_value(m, msg_idx, dataset + "/nsecs", dims, index, stamp.nsecs);
         }
     }
 
     template <typename ValueT>
-    void insert_value(const size_t msg_idx,
+    void insert_value(Embag::RosMessage& m,
+                      const size_t msg_idx,
                       const std::string& dataset,
                       const NDIndex& dims,
                       const NDIndex& index,
                       const ValueT& v) {
         if (datasets_.count(dataset) == 0) {
+            const ROSDatasetAttributes attrs(m);
             datasets_.emplace(std::piecewise_construct, std::forward_as_tuple(dataset),
-                              std::forward_as_tuple(h5_file_, dataset, dims, v));
+                              std::forward_as_tuple(h5_file_, attrs, dataset, dims, v));
         }
 
         NDBuffer& d = datasets_.at(dataset);
