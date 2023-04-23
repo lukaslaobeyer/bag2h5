@@ -10,6 +10,8 @@
 #include <highfive/H5DataSpace.hpp>
 #include <highfive/H5File.hpp>
 #include <magic_enum.hpp>
+#include <cxxopts.hpp>
+
 
 namespace bag2h5::h5_conversion {
 
@@ -288,7 +290,7 @@ private:
 
         NDBuffer& d = datasets_.at(dataset);
         if (d.dims() != dims) {
-            throw std::runtime_error("dims must be constant for each field");
+            throw std::runtime_error("dims must be constant for each field (offending dataset: " + dataset + ")");
         }
         d.insert(msg_idx, index, v);
     }
@@ -302,13 +304,36 @@ private:
 } // namespace bag2h5::h5_conversion
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        LOG_ERROR("usage: file1.bag [file2.bag ...] out.h5");
+    cxxopts::Options options(argv[0], "Convert ros bags to HDF5.");
+    options
+        .positional_help("file1.bag [file2.bag...] out.h5")
+        .add_options()
+        ("h,help", "print this help message")
+        ("e,exclude", "topics to exclude", cxxopts::value<std::vector<std::string>>())
+        ("positional", "", cxxopts::value<std::vector<std::string>>());
+    options.parse_positional({"positional"});
+    auto parsed_options = options.parse(argc, argv);
+
+    if (parsed_options.count("help") ||
+        parsed_options.count("positional") == 0 ||
+        parsed_options["positional"].as<std::vector<std::string>>().size() < 2) {
+        std::cout << options.help() << std::endl;
         return -1;
     }
 
-    std::vector<std::string> bagfiles(argv + 1, argv + argc - 1);
-    std::string outfile(argv[argc - 1]);
+    const auto exclude_topics = ([&]() {
+        if (parsed_options.count("exclude")) {
+            const auto topics_vec = parsed_options["exclude"].as<std::vector<std::string>>();
+            return std::set<std::string>(topics_vec.begin(), topics_vec.end());
+        }
+        return std::set<std::string>();
+    })();
+    for (auto&& s : exclude_topics)
+        LOG_DEBUG("exclude: %s", s.c_str());
+
+    const auto in_out_filenames = parsed_options["positional"].as<std::vector<std::string>>();
+    const std::vector<std::string> bagfiles(in_out_filenames.begin(), in_out_filenames.end() - 1);
+    const std::string outfile(in_out_filenames.back());
 
     Embag::View view;
     for (const auto& filename : bagfiles) {
@@ -328,6 +353,8 @@ int main(int argc, char** argv) {
     bag2h5::h5_conversion::H5Writer h5w(outfile);
 
     for (const auto& m : view.getMessages()) {
+        if (exclude_topics.contains(m->topic)) continue;
+
         h5w.process_msg(*m);
 
         const double t = m->timestamp.to_sec() - t_start;

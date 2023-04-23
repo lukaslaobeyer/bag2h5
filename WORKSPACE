@@ -27,7 +27,16 @@ http_archive(
     name = "magic_enum",
     sha256 = "62bd7034bbbfc3d7806001767d5775ab42f3ff33bb38366e1ceb21102f0dff9a",
     url = "https://github.com/Neargye/magic_enum/archive/refs/tags/v0.8.2.tar.gz",
-    strip_prefix="magic_enum-0.8.2"
+    strip_prefix = "magic_enum-0.8.2"
+)
+
+# cxxopts
+http_archive(
+    name = "cxxopts",
+    sha256 = "523175f792eb0ff04f9e653c90746c12655f10cb70f1d5e6d6d9491420298a08",
+    url = "https://github.com/jarro2783/cxxopts/archive/refs/tags/v3.1.1.tar.gz",
+    strip_prefix = "cxxopts-3.1.1",
+    build_file = "@//deps/cxxopts:BUILD",
 )
 
 # HDF5

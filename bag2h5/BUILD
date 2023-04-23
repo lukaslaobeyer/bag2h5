@@ -8,6 +8,7 @@ cc_binary(
         ":logging",
         "@eigen",
         "@magic_enum",
+	"@cxxopts",
         "@embag",
         "@highfive",
     ],
