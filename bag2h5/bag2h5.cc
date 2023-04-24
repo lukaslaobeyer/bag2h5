@@ -5,13 +5,12 @@
 #include <vector>
 
 #include <Eigen/Dense>
+#include <cxxopts.hpp>
 #include <embag/view.h>
 #include <highfive/H5DataSet.hpp>
 #include <highfive/H5DataSpace.hpp>
 #include <highfive/H5File.hpp>
 #include <magic_enum.hpp>
-#include <cxxopts.hpp>
-
 
 namespace bag2h5::h5_conversion {
 
@@ -116,10 +115,39 @@ H5Dataset create_dataset(h5::File& f,
 
     h5::DataSet h5_dataset = f.createDataSet(dataset_name, dataspace, h5_datatype, props);
     attrs.write(h5_dataset);
-    return H5Dataset(std::move(h5_dataset),
-                     std::move(chunk_dims),
-                     std::move(primitive_array_dims), h5_datatype);
+    return H5Dataset(std::move(h5_dataset), std::move(chunk_dims), std::move(primitive_array_dims),
+                     h5_datatype);
 }
+
+class DatasetInfo {
+public:
+    DatasetInfo(const NDIndex& dims)
+        : dims_(dims)
+        , is_variable_length_(false)
+        , variable_length_dims_(dims.size(), false) {}
+
+    void resize(const NDIndex& new_dims) {
+        if (new_dims.size() != dims_.size())
+            throw new std::runtime_error("variable dimensionality not supported");
+
+        for (size_t i = 0; i < dims_.size(); i++) {
+            if (dims_.at(i) != new_dims.at(i)) {
+                is_variable_length_ = true;
+                variable_length_dims_.at(i) = true;
+                if (new_dims.at(i) > dims_.at(i)) dims_.at(i) = new_dims.at(i);
+            }
+        }
+    }
+
+    const NDIndex& dims() const { return dims_; }
+    bool is_variable_length() const { return is_variable_length_; }
+    bool is_variable_length(size_t i) const { return variable_length_dims_.at(i); }
+
+private:
+    NDIndex dims_;
+    bool is_variable_length_;
+    std::vector<bool> variable_length_dims_;
+};
 
 class NDBuffer {
 public:
@@ -211,11 +239,24 @@ private:
 
 class H5Writer {
 public:
+    enum class Mode {
+        SCAN,
+        WRITE,
+    };
+
+public:
     H5Writer(const std::string& outfile)
-        : h5_file_(outfile, h5::File::Overwrite) {}
+        : mode_(Mode::SCAN)
+        , h5_file_(outfile, h5::File::Overwrite) {}
+
+    void scan_msg(Embag::RosMessage& m) {
+        if (mode_ != Mode::SCAN) throw new std::runtime_error("cannot scan message: this is a bug");
+        process_value(m, num_msgs_, m.data(), m.topic);
+    }
 
     void process_msg(Embag::RosMessage& m) {
-        insert_timestamp(m, num_msgs_, m.topic + "/__ros_msg/timestamp", {}, {}, m.timestamp);
+        if (mode_ != Mode::WRITE) mode_ = Mode::WRITE;
+        handle_timestamp(m, num_msgs_, m.topic + "/__ros_msg/timestamp", {}, {}, m.timestamp);
         process_value(m, num_msgs_, m.data(), m.topic);
         ++num_msgs_;
     }
@@ -226,6 +267,12 @@ public:
                 LOG_INFO("%s [%s]", key.c_str(), it_to_string(val.dims(), "x").c_str());
             else
                 LOG_INFO("%s", key.c_str());
+        }
+    }
+
+    void print_scan_results() const {
+        for (auto&& [name, info] : dataset_info_) {
+            if (info.is_variable_length()) LOG_INFO("Variable length dataset: %s", name.c_str());
         }
     }
 
@@ -250,17 +297,17 @@ private:
                 }
             }
         } else if (v->getType() == Embag::RosValue::Type::ros_time) {
-            insert_timestamp(m, msg_idx, dataset, dims, index,
+            handle_timestamp(m, msg_idx, dataset, dims, index,
                              v->as<Embag::RosValue::ros_time_t>());
         } else if (type_info::is_primitive(v->getType())) {
             const std::string type_name(magic_enum::enum_name(v->getType()));
-            insert_value(m, msg_idx, dataset, dims, index, v);
+            handle_value(m, msg_idx, dataset, dims, index, v);
         } else {
             throw std::runtime_error("unknown value at " + dataset);
         }
     }
 
-    void insert_timestamp(Embag::RosMessage& m,
+    void handle_timestamp(Embag::RosMessage& m,
                           const size_t msg_idx,
                           const std::string& dataset,
                           const NDIndex& dims,
@@ -268,10 +315,25 @@ private:
                           const Embag::RosValue::ros_time_t& stamp) {
         constexpr bool CONVERT_TIMESTAMP_TO_DOUBLE = false;
         if (CONVERT_TIMESTAMP_TO_DOUBLE) {
-            insert_value(m, msg_idx, dataset, dims, index, stamp);
+            handle_value(m, msg_idx, dataset, dims, index, stamp);
         } else {
-            insert_value(m, msg_idx, dataset + "/secs", dims, index, stamp.secs);
-            insert_value(m, msg_idx, dataset + "/nsecs", dims, index, stamp.nsecs);
+            handle_value(m, msg_idx, dataset + "/secs", dims, index, stamp.secs);
+            handle_value(m, msg_idx, dataset + "/nsecs", dims, index, stamp.nsecs);
+        }
+    }
+
+    template <typename ValueT>
+    void handle_value(Embag::RosMessage& m,
+                      const size_t msg_idx,
+                      const std::string& dataset,
+                      const NDIndex& dims,
+                      const NDIndex& index,
+                      const ValueT& v) {
+        switch (mode_) {
+        case Mode::SCAN:
+            return record_dataset_info(dataset, dims);
+        case Mode::WRITE:
+            return insert_value(m, msg_idx, dataset, dims, index, v);
         }
     }
 
@@ -282,22 +344,51 @@ private:
                       const NDIndex& dims,
                       const NDIndex& index,
                       const ValueT& v) {
+        const bool is_variable_length =
+            dataset_info_.contains(dataset) && dataset_info_.at(dataset).is_variable_length();
+
         if (datasets_.count(dataset) == 0) {
             const ROSDatasetAttributes attrs(m);
+            const NDIndex& final_dims =
+                is_variable_length ? dataset_info_.at(dataset).dims() : dims;
             datasets_.emplace(std::piecewise_construct, std::forward_as_tuple(dataset),
-                              std::forward_as_tuple(h5_file_, attrs, dataset, dims, v));
+                              std::forward_as_tuple(h5_file_, attrs, dataset, final_dims, v));
         }
 
         NDBuffer& d = datasets_.at(dataset);
-        if (d.dims() != dims) {
-            throw std::runtime_error("dims must be constant for each field (offending dataset: " + dataset + ")");
+        if (is_variable_length) {
+            if (std::all_of(index.cbegin(), index.cend(), [](size_t i) { return i == 0; })) {
+                if (dims.size() == 1)
+                    insert_value(m, msg_idx, dataset + "_size", {}, {}, dims.at(0));
+                else
+                    for (size_t i = 0; i < dims.size(); i++)
+                        insert_value(m, msg_idx, dataset + "_size", {dims.size()}, {i}, dims.at(i));
+            }
+        } else if (d.dims() != dims) {
+            throw std::runtime_error("dims must be constant for each field (offending dataset: " +
+                                     dataset + " was of size " + it_to_string(d.dims(), "x") +
+                                     " but is now " + it_to_string(dims, "x") + ")");
         }
         d.insert(msg_idx, index, v);
     }
 
+    void record_dataset_info(const std::string& dataset, const NDIndex& dims) {
+        if (dataset_info_.count(dataset) == 0) {
+            dataset_info_.emplace(std::piecewise_construct, std::forward_as_tuple(dataset),
+                                  std::forward_as_tuple(dims));
+        }
+        dataset_info_.at(dataset).resize(dims);
+    }
+
 private:
+    Mode mode_;
     size_t num_msgs_;
     h5::File h5_file_;
+
+    // Only used during Mode::SCAN:
+    std::unordered_map<std::string, DatasetInfo> dataset_info_;
+
+    // Only used during Mode::WRITE:
     std::unordered_map<std::string, NDBuffer> datasets_;
 };
 
@@ -305,17 +396,18 @@ private:
 
 int main(int argc, char** argv) {
     cxxopts::Options options(argv[0], "Convert ros bags to HDF5.");
+    // clang-format off
     options
         .positional_help("file1.bag [file2.bag...] out.h5")
         .add_options()
-        ("h,help", "print this help message")
-        ("e,exclude", "topics to exclude", cxxopts::value<std::vector<std::string>>())
-        ("positional", "", cxxopts::value<std::vector<std::string>>());
+            ("h,help", "print this help message")
+            ("e,exclude", "topics to exclude", cxxopts::value<std::vector<std::string>>())
+            ("positional", "", cxxopts::value<std::vector<std::string>>());
+    // clang-format on
     options.parse_positional({"positional"});
     auto parsed_options = options.parse(argc, argv);
 
-    if (parsed_options.count("help") ||
-        parsed_options.count("positional") == 0 ||
+    if (parsed_options.count("help") || parsed_options.count("positional") == 0 ||
         parsed_options["positional"].as<std::vector<std::string>>().size() < 2) {
         std::cout << options.help() << std::endl;
         return -1;
@@ -328,8 +420,7 @@ int main(int argc, char** argv) {
         }
         return std::set<std::string>();
     })();
-    for (auto&& s : exclude_topics)
-        LOG_DEBUG("exclude: %s", s.c_str());
+    for (auto&& s : exclude_topics) LOG_DEBUG("exclude: %s", s.c_str());
 
     const auto in_out_filenames = parsed_options["positional"].as<std::vector<std::string>>();
     const std::vector<std::string> bagfiles(in_out_filenames.begin(), in_out_filenames.end() - 1);
@@ -352,6 +443,22 @@ int main(int argc, char** argv) {
 
     bag2h5::h5_conversion::H5Writer h5w(outfile);
 
+    // First pass: scan through without writing anything
+    //   to detect variable length datasets
+    LOG_INFO("Scanning dataset");
+    for (const auto& m : view.getMessages()) {
+        if (exclude_topics.contains(m->topic)) continue;
+        h5w.scan_msg(*m);
+        const double t = m->timestamp.to_sec() - t_start;
+        if (std::isnan(t_prev) || t - t_prev > log_dt) {
+            logging::print_progress(t / (t_end - t_start));
+            t_prev = t;
+        }
+    }
+    logging::print_progress(1.0);
+    h5w.print_scan_results();
+
+    LOG_INFO("Writing hdf5");
     for (const auto& m : view.getMessages()) {
         if (exclude_topics.contains(m->topic)) continue;
 
