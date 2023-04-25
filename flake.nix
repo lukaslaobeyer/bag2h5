@@ -8,7 +8,7 @@
         pkgs = import nixpkgs { inherit system; };
       in
         with pkgs; mkShell {
-          nativeBuildInputs = [ bazel_5 ];
+          nativeBuildInputs = [ bazel_5 gdb ];
         };
   };
 

@@ -19,14 +19,24 @@ using NDIndex = std::vector<size_t>;
 
 template <typename T>
 std::vector<T> append(const std::vector<T>& vec, const T& val) {
-    std::vector<size_t> new_vec(vec.size() + 1);
+    std::vector<T> new_vec(vec.size() + 1);
     std::copy(vec.begin(), vec.end(), new_vec.begin());
     new_vec[vec.size()] = val;
     return new_vec;
 }
 
 template <typename T>
+std::vector<T> append(const std::vector<T>& vec0, const std::vector<T>& vec1) {
+    std::vector<T> new_vec(vec0.size() + vec1.size());
+    std::copy(vec0.begin(), vec0.end(), new_vec.begin());
+    std::copy(vec1.begin(), vec1.end(), new_vec.begin() + vec0.size());
+    return new_vec;
+}
+
+template <typename T>
 std::string it_to_string(const T& vals, const std::string& sep) {
+    if (vals.size() == 0) return "<empty>";
+
     std::string str("");
     for (const auto& v : vals) {
         str.append(std::to_string(v) + sep);
@@ -35,10 +45,50 @@ std::string it_to_string(const T& vals, const std::string& sep) {
     return str;
 }
 
+class DatasetInfo {
+public:
+    DatasetInfo(const NDIndex& dims, const NDIndex& prim_dims, const h5::DataType& h5_type_in)
+        : h5_type(h5_type_in)
+        , dims_(dims)
+        , prim_dims_(prim_dims)
+        , is_variable_length_(false) {}
+
+    void resize(const NDIndex& new_dims, const NDIndex& new_prim_dims) {
+        if (new_dims.size() != dims_.size() || new_prim_dims.size() != prim_dims_.size())
+            throw new std::runtime_error("variable dimensionality not supported");
+
+        for (size_t i = 0; i < dims_.size(); i++) {
+            if (dims_.at(i) != new_dims.at(i)) {
+                is_variable_length_ = true;
+                if (new_dims.at(i) > dims_.at(i)) dims_.at(i) = new_dims.at(i);
+            }
+        }
+
+        for (size_t i = 0; i < prim_dims_.size(); i++) {
+            if (prim_dims_.at(i) != new_prim_dims.at(i)) {
+                is_variable_length_ = true;
+                if (new_prim_dims.at(i) > prim_dims_.at(i)) prim_dims_.at(i) = new_prim_dims.at(i);
+            }
+        }
+    }
+
+    const NDIndex& dims() const { return dims_; }
+    const NDIndex& prim_dims() const { return prim_dims_; }
+    bool is_variable_length() const { return is_variable_length_; }
+
+public:
+    const h5::DataType h5_type;
+
+private:
+    NDIndex dims_;
+    NDIndex prim_dims_;
+    bool is_variable_length_;
+};
+
 struct H5Dataset {
     H5Dataset(h5::DataSet&& d_in,
               std::vector<hsize_t>&& chunk_dims_in,
-              std::vector<hsize_t>&& prim_dims_in,
+              const std::vector<hsize_t>& prim_dims_in,
               const h5::DataType& h5_type_in)
         : d(d_in)
         , chunk_dims(chunk_dims_in)
@@ -69,22 +119,19 @@ private:
     const std::string msg_type;
 };
 
-template <typename ValueT>
 H5Dataset create_dataset(h5::File& f,
                          const ROSDatasetAttributes& attrs,
                          const std::string& dataset_name,
-                         const NDIndex& dims,
-                         const ValueT& v) {
+                         const DatasetInfo& info) {
     using namespace type_info;
 
     // Dataspace
-    std::vector<hsize_t> primitive_array_dims = get_primitive_array_dims(v);
-    std::vector<hsize_t> full_dims(1 + dims.size() + primitive_array_dims.size());
+    std::vector<hsize_t> full_dims(1 + info.dims().size() + info.prim_dims().size());
     full_dims.at(0) = 0;
-    std::transform(dims.begin(), dims.end(), full_dims.begin() + 1,
+    std::transform(info.dims().begin(), info.dims().end(), full_dims.begin() + 1,
                    [](const size_t& i) { return static_cast<hsize_t>(i); });
-    std::copy(primitive_array_dims.begin(), primitive_array_dims.end(),
-              full_dims.begin() + 1 + dims.size());
+    std::copy(info.prim_dims().begin(), info.prim_dims().end(),
+              full_dims.begin() + 1 + info.dims().size());
     std::vector<hsize_t> max_dims(full_dims);
     max_dims[0] = h5::DataSpace::UNLIMITED;
     h5::DataSpace dataspace(full_dims, max_dims);
@@ -92,83 +139,48 @@ H5Dataset create_dataset(h5::File& f,
     // Chunking
     constexpr hsize_t MAX_FLAT_CHUNK_SIZE = 1000000;
 
-    const size_t nonprim_dims_prod = std::reduce(dims.begin(), dims.end(), 1, std::multiplies<>());
-    const size_t elem_size = nonprim_dims_prod * std::max(1uz, get_size(v)); // must be positive
+    const size_t nonprim_dims_prod =
+        std::reduce(info.dims().begin(), info.dims().end(), 1, std::multiplies<>());
+    const size_t prim_dims_prod =
+        std::reduce(info.prim_dims().begin(), info.prim_dims().end(), 1, std::multiplies<>());
+    if (prim_dims_prod == 0)
+        throw std::runtime_error("cannot create dataset with zero element size");
+    const size_t elem_size =
+        nonprim_dims_prod *
+        std::max(1uz, prim_dims_prod * info.h5_type.getSize()); // must be positive
     std::vector<hsize_t> chunk_dims(full_dims.size());
     chunk_dims.at(0) =
         1 +
         std::trunc(static_cast<double>(MAX_FLAT_CHUNK_SIZE) / static_cast<double>(elem_size) - 0.5);
     std::copy(full_dims.begin() + 1, full_dims.end(), chunk_dims.begin() + 1);
 
-    // Datatype
-    h5::DataType h5_datatype = h5_datatype_from_value(v);
-
     // Debug
     LOG_DEBUG("Creating dataspace for %s [%s]", dataset_name.c_str(),
-              it_to_string(dims, "x").c_str());
-    LOG_DEBUG("  - num primitive dims = %lu", primitive_array_dims.size());
+              it_to_string(append(info.dims(), info.prim_dims()), "x").c_str());
+    LOG_DEBUG("  - num primitive dims = %lu", info.prim_dims().size());
     LOG_DEBUG("  - dataspace: %s, chunks: %s", it_to_string(full_dims, "x").c_str(),
               it_to_string(chunk_dims, "x").c_str());
 
     h5::DataSetCreateProps props;
     props.add(h5::Chunking(chunk_dims));
 
-    h5::DataSet h5_dataset = f.createDataSet(dataset_name, dataspace, h5_datatype, props);
+    h5::DataSet h5_dataset = f.createDataSet(dataset_name, dataspace, info.h5_type, props);
     attrs.write(h5_dataset);
-    return H5Dataset(std::move(h5_dataset), std::move(chunk_dims), std::move(primitive_array_dims),
-                     h5_datatype);
+    return H5Dataset(std::move(h5_dataset), std::move(chunk_dims), info.prim_dims(), info.h5_type);
 }
-
-class DatasetInfo {
-public:
-    DatasetInfo(const NDIndex& dims)
-        : dims_(dims)
-        , is_variable_length_(false)
-        , variable_length_dims_(dims.size(), false) {}
-
-    void resize(const NDIndex& new_dims) {
-        if (new_dims.size() != dims_.size())
-            throw new std::runtime_error("variable dimensionality not supported");
-
-        for (size_t i = 0; i < dims_.size(); i++) {
-            if (dims_.at(i) != new_dims.at(i)) {
-                is_variable_length_ = true;
-                variable_length_dims_.at(i) = true;
-                if (new_dims.at(i) > dims_.at(i)) dims_.at(i) = new_dims.at(i);
-            }
-        }
-    }
-
-    const NDIndex& dims() const { return dims_; }
-    bool is_variable_length() const { return is_variable_length_; }
-    bool is_variable_length(size_t i) const { return variable_length_dims_.at(i); }
-
-private:
-    NDIndex dims_;
-    bool is_variable_length_;
-    std::vector<bool> variable_length_dims_;
-};
 
 class NDBuffer {
 public:
-    template <typename ValueT>
     NDBuffer(h5::File& f,
              const ROSDatasetAttributes& attrs,
              const std::string& dataset_name,
-             const NDIndex& dims,
-             const ValueT& v)
-        : d_(create_dataset(f, attrs, dataset_name, dims, v))
-        , dims_(dims)
+             const DatasetInfo& info)
+        : d_(create_dataset(f, attrs, dataset_name, info))
         , awaiting_first_msg_(true)
         , dataset_index_(d_.chunk_dims.size(), 0)
         , dataset_index_count_(d_.chunk_dims.size(), 1)
         , dataset_size_(d_.chunk_dims)
-        , msg_idx_(0) {
-        std::copy(d_.prim_dims.begin(), d_.prim_dims.end(),
-                  dataset_index_count_.end() - d_.prim_dims.size());
-    }
-
-    const NDIndex& dims() const { return dims_; }
+        , msg_idx_(0) {}
 
     template <typename T>
     void write_value(const T& v, h5::Selection&& selection) {
@@ -221,14 +233,22 @@ public:
         dataset_size_.at(0) = dataset_index_.at(0) + 1;
         d_.d.resize(dataset_size_);
 
+        // Use correct primitive array dims
+        if (d_.prim_dims.size() > 0) {
+            const NDIndex prim_dims = type_info::get_primitive_array_dims(v);
+            std::copy(prim_dims.begin(), prim_dims.end(),
+                      dataset_index_count_.end() - prim_dims.size());
+        }
+
         // Copy into dataset
         std::copy(index.begin(), index.end(), dataset_index_.begin() + 1);
         write_value(v, d_.d.select(dataset_index_, dataset_index_count_));
     }
 
+    const std::vector<hsize_t>& size() const { return dataset_size_; }
+
 private:
     H5Dataset d_;
-    const NDIndex dims_;
 
     bool awaiting_first_msg_;
     std::vector<hsize_t> dataset_index_;
@@ -262,11 +282,8 @@ public:
     }
 
     void print_datasets() const {
-        for (const auto& [key, val] : datasets_) {
-            if (val.dims().size() > 0)
-                LOG_INFO("%s [%s]", key.c_str(), it_to_string(val.dims(), "x").c_str());
-            else
-                LOG_INFO("%s", key.c_str());
+        for (const auto& [key, d] : datasets_) {
+            LOG_INFO("%s [%s]", key.c_str(), it_to_string(d.size(), "x").c_str());
         }
     }
 
@@ -331,53 +348,81 @@ private:
                       const ValueT& v) {
         switch (mode_) {
         case Mode::SCAN:
-            return record_dataset_info(dataset, dims);
-        case Mode::WRITE:
+            return record_dataset_info(dataset, dims, v);
+        case Mode::WRITE: {
+            if (!dataset_info_.contains(dataset)) record_dataset_info(dataset, dims, v);
             return insert_value(m, msg_idx, dataset, dims, index, v);
+        }
         }
     }
 
     template <typename ValueT>
     void insert_value(Embag::RosMessage& m,
                       const size_t msg_idx,
-                      const std::string& dataset,
+                      const std::string& dataset_in,
                       const NDIndex& dims,
                       const NDIndex& index,
                       const ValueT& v) {
-        const bool is_variable_length =
-            dataset_info_.contains(dataset) && dataset_info_.at(dataset).is_variable_length();
+        const DatasetInfo& info = dataset_info_.at(dataset_in);
 
-        if (datasets_.count(dataset) == 0) {
+        // If the dataset is variable length, then create a new group out of it
+        // with two subkeys representing its data and size.
+        const std::string dataset = dataset_in + (info.is_variable_length() ? "/data" : "");
+
+        if (!datasets_.contains(dataset)) {
+            // Skip fields whose content is empty.
+            const size_t prim_dims_prod = std::reduce(
+                info.prim_dims().begin(), info.prim_dims().end(), 1, std::multiplies<>());
+            if (prim_dims_prod == 0) {
+                LOG_DEBUG("skipping message at %s since it is empty (primitive dimensions %s)",
+                          dataset.c_str(), it_to_string(info.prim_dims(), "x").c_str());
+                return;
+            }
+
             const ROSDatasetAttributes attrs(m);
-            const NDIndex& final_dims =
-                is_variable_length ? dataset_info_.at(dataset).dims() : dims;
             datasets_.emplace(std::piecewise_construct, std::forward_as_tuple(dataset),
-                              std::forward_as_tuple(h5_file_, attrs, dataset, final_dims, v));
+                              std::forward_as_tuple(h5_file_, attrs, dataset, info));
         }
 
         NDBuffer& d = datasets_.at(dataset);
-        if (is_variable_length) {
+        const NDIndex prim_dims = type_info::get_primitive_array_dims(v);
+        if (info.is_variable_length()) {
+            // Write variable sizes as new datasets.
+            const NDIndex full_dims = append(dims, prim_dims);
             if (std::all_of(index.cbegin(), index.cend(), [](size_t i) { return i == 0; })) {
-                if (dims.size() == 1)
-                    insert_value(m, msg_idx, dataset + "_size", {}, {}, dims.at(0));
+                if (full_dims.size() == 1)
+                    handle_value(m, msg_idx, dataset_in + "/size", {}, {}, full_dims.at(0));
                 else
-                    for (size_t i = 0; i < dims.size(); i++)
-                        insert_value(m, msg_idx, dataset + "_size", {dims.size()}, {i}, dims.at(i));
+                    for (size_t i = 0; i < full_dims.size(); i++)
+                        handle_value(m, msg_idx, dataset_in + "/size", {full_dims.size()}, {i},
+                                     full_dims.at(i));
             }
-        } else if (d.dims() != dims) {
-            throw std::runtime_error("dims must be constant for each field (offending dataset: " +
-                                     dataset + " was of size " + it_to_string(d.dims(), "x") +
-                                     " but is now " + it_to_string(dims, "x") + ")");
+        } else {
+            if (info.dims() != dims) {
+                throw std::runtime_error(
+                    "dims must be constant for each field (offending dataset: " + dataset +
+                    " was of size " + it_to_string(info.dims(), "x") + " but is now " +
+                    it_to_string(dims, "x") + ")");
+            }
+            if (info.prim_dims() != prim_dims) {
+                throw std::runtime_error(
+                    "primitive array dims must be constant for each field (offending dataset: " +
+                    dataset + " was of size " + it_to_string(info.prim_dims(), "x") +
+                    " but is now " + it_to_string(prim_dims, "x") + ")");
+            }
         }
         d.insert(msg_idx, index, v);
     }
 
-    void record_dataset_info(const std::string& dataset, const NDIndex& dims) {
+    template <typename ValueT>
+    void record_dataset_info(const std::string& dataset, const NDIndex& dims, const ValueT& v) {
+        using namespace type_info;
         if (dataset_info_.count(dataset) == 0) {
             dataset_info_.emplace(std::piecewise_construct, std::forward_as_tuple(dataset),
-                                  std::forward_as_tuple(dims));
+                                  std::forward_as_tuple(dims, get_primitive_array_dims(v),
+                                                        h5_datatype_from_value(v)));
         }
-        dataset_info_.at(dataset).resize(dims);
+        dataset_info_.at(dataset).resize(dims, get_primitive_array_dims(v));
     }
 
 private:
@@ -445,17 +490,11 @@ int main(int argc, char** argv) {
 
     // First pass: scan through without writing anything
     //   to detect variable length datasets
-    LOG_INFO("Scanning dataset");
+    LOG_INFO("Scanning dataset...");
     for (const auto& m : view.getMessages()) {
         if (exclude_topics.contains(m->topic)) continue;
         h5w.scan_msg(*m);
-        const double t = m->timestamp.to_sec() - t_start;
-        if (std::isnan(t_prev) || t - t_prev > log_dt) {
-            logging::print_progress(t / (t_end - t_start));
-            t_prev = t;
-        }
     }
-    logging::print_progress(1.0);
     h5w.print_scan_results();
 
     LOG_INFO("Writing hdf5");
